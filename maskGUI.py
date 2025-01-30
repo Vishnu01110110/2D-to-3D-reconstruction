@@ -1,214 +1,193 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
 import cv2
 import numpy as np
+import os
+from transformers import pipeline
 from ultralytics import SAM
 import torch
-from PIL import Image, ImageTk
-import os
 
-class SAMDetectorGUI:
+class CombinedSegmentationGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("SAM Detector GUI")
+        self.root.title("Background Removal + SAM Segmentation")
         
-        # Initialize variables
-        self.image = None
-        self.photo = None
-        self.display_image = None
-        self.scale = 0.8
-        self.points = []
-        self.current_mode = "point"  # or "box"
-        self.box_start = None
+        # Initialize save directory
         self.save_dir = "segments"
         os.makedirs(self.save_dir, exist_ok=True)
         
-        # Load SAM model
-        print("Loading SAM model...")
-        self.model = SAM("sam2_b.pt")
-        print("Model loaded successfully!")
+        # Initialize models
+        try:
+            print("Loading background removal model...")
+            self.bg_pipe = pipeline("image-segmentation", 
+                                  model="briaai/RMBG-1.4", 
+                                  trust_remote_code=True)
+            print("Loading SAM model...")
+            self.sam_model = SAM("sam2_b.pt")
+            print("Models loaded successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load models: {str(e)}")
+            root.destroy()
+            return
+
+        # Initialize variables
+        self.current_image = None
+        self.no_bg_image = None
+        self.processed_image = None
+        self.scale = 0.8
         
-        # Create GUI elements
-        self.create_widgets()
+        # Create GUI
+        self.setup_gui()
         
-    def create_widgets(self):
-        # Control panel
-        control_frame = ttk.Frame(self.root)
-        control_frame.pack(fill=tk.X, padx=5, pady=5)
+    def setup_gui(self):
+        # Control buttons
+        btn_frame = ttk.Frame(self.root)
+        btn_frame.pack(pady=10)
         
-        # Left side buttons
-        btn_frame = ttk.Frame(control_frame)
-        btn_frame.pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Load Image", 
+                  command=self.load_and_process_image).pack(side=tk.LEFT, padx=5)
         
-        ttk.Button(btn_frame, text="Load Image", command=self.load_image).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Clear", command=self.clear_points).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Process", command=self.process_current_image).pack(side=tk.LEFT, padx=5)
+        # Create frame for image previews
+        preview_frame = ttk.Frame(self.root)
+        preview_frame.pack(pady=10, expand=True, fill=tk.BOTH)
         
-        # Mode selection
-        mode_frame = ttk.Frame(control_frame)
-        mode_frame.pack(side=tk.LEFT, padx=20)
+        # Create three columns for previews
+        self.preview_frames = []
+        self.preview_labels = []
+        self.image_labels = []
         
-        ttk.Label(mode_frame, text="Mode:").pack(side=tk.LEFT)
-        self.mode_var = tk.StringVar(value="point")
-        ttk.Radiobutton(mode_frame, text="Point", variable=self.mode_var, 
-                       value="point", command=self.change_mode).pack(side=tk.LEFT)
-        ttk.Radiobutton(mode_frame, text="Box", variable=self.mode_var,
-                       value="box", command=self.change_mode).pack(side=tk.LEFT)
+        titles = ["Original Image", "Background Removed", "Segmented Result"]
         
-        # Point type selection (positive/negative)
-        self.point_type_var = tk.StringVar(value="positive")
-        point_frame = ttk.Frame(control_frame)
-        point_frame.pack(side=tk.LEFT, padx=20)
-        
-        ttk.Label(point_frame, text="Point Type:").pack(side=tk.LEFT)
-        ttk.Radiobutton(point_frame, text="Positive", variable=self.point_type_var,
-                       value="positive").pack(side=tk.LEFT)
-        ttk.Radiobutton(point_frame, text="Negative", variable=self.point_type_var,
-                       value="negative").pack(side=tk.LEFT)
-        
-        # Canvas for image display
-        self.canvas = tk.Canvas(self.root, cursor="cross")
-        self.canvas.pack(expand=True, fill=tk.BOTH)
-        
-        # Bind mouse events
-        self.canvas.bind("<ButtonPress-1>", self.on_click)
-        self.canvas.bind("<B1-Motion>", self.on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_release)
-        
-    def change_mode(self):
-        self.current_mode = self.mode_var.get()
-        self.clear_points()
-        
-    def load_image(self):
-        file_path = filedialog.askopenfilename(
-            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.gif *.tiff")]
-        )
-        if file_path:
-            self.image = cv2.imread(file_path)
-            if self.image is None:
-                messagebox.showerror("Error", "Failed to load image")
-                return
-            self.display_image = self.image.copy()
-            self.update_canvas()
-            self.clear_points()
+        for i, title in enumerate(titles):
+            frame = ttk.Frame(preview_frame)
+            frame.grid(row=0, column=i, padx=5, pady=5, sticky="nsew")
+            preview_frame.grid_columnconfigure(i, weight=1)
             
-    def update_canvas(self):
-        if self.display_image is not None:
-            height, width = self.display_image.shape[:2]
-            new_width = int(width * self.scale)
-            new_height = int(height * self.scale)
-            resized = cv2.resize(self.display_image, (new_width, new_height))
+            # Title label
+            title_label = ttk.Label(frame, text=title)
+            title_label.pack(pady=5)
             
-            image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            # Image label
+            image_label = ttk.Label(frame)
+            image_label.pack(expand=True)
+            
+            self.preview_frames.append(frame)
+            self.preview_labels.append(title_label)
+            self.image_labels.append(image_label)
+        
+        # Status label
+        self.status_label = ttk.Label(self.root, text="Ready")
+        self.status_label.pack(pady=5)
+        
+    def update_preview(self, image, index):
+        """Update preview image at specified index"""
+        if isinstance(image, np.ndarray):
+            # Convert OpenCV image to PIL
+            if image.shape[2] == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(image)
-            self.photo = ImageTk.PhotoImage(image=image)
+        elif not isinstance(image, Image.Image):
+            # If it's neither numpy array nor PIL image, convert to PIL
+            image = Image.fromarray(np.array(image))
             
-            self.canvas.config(width=new_width, height=new_height)
-            self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
-            
-    def on_click(self, event):
-        if self.image is None:
-            return
-            
-        if self.current_mode == "point":
-            # Add point
-            x, y = event.x / self.scale, event.y / self.scale
-            self.points.append((int(x), int(y)))
-            
-            # Draw point
-            color = "green" if self.point_type_var.get() == "positive" else "red"
-            self.canvas.create_oval(
-                event.x-5, event.y-5, event.x+5, event.y+5,
-                fill=color, outline=color
-            )
-        else:  # box mode
-            self.box_start = (event.x, event.y)
-            
-    def on_drag(self, event):
-        if self.current_mode == "box" and self.box_start:
-            # Refresh display
-            self.display_image = self.image.copy()
-            self.update_canvas()
-            
-            # Draw current box
-            self.canvas.create_rectangle(
-                self.box_start[0], self.box_start[1],
-                event.x, event.y,
-                outline="green", width=2
-            )
-            
-    def on_release(self, event):
-        if self.current_mode == "box" and self.box_start:
-            # Calculate box coordinates in original image scale
-            x1, y1 = int(self.box_start[0] / self.scale), int(self.box_start[1] / self.scale)
-            x2, y2 = int(event.x / self.scale), int(event.y / self.scale)
-            self.points = [x1, y1, x2, y2]
-            self.box_start = None
-            
-    def clear_points(self):
-        self.points = []
-        self.box_start = None
-        if self.image is not None:
-            self.display_image = self.image.copy()
-            self.update_canvas()
-            
-    def process_current_image(self):
-        if self.image is None:
-            messagebox.showwarning("Warning", "Please load an image first")
-            return
-            
-        if not self.points:
-            messagebox.showwarning("Warning", "Please add points or box first")
+        # Resize for preview
+        display_size = (300, 300)  # Fixed size for preview
+        image.thumbnail(display_size, Image.Resampling.LANCZOS)
+        
+        # Convert to PhotoImage and update label
+        photo = ImageTk.PhotoImage(image)
+        self.image_labels[index].config(image=photo)
+        self.image_labels[index].image = photo  # Keep reference
+        
+    def load_and_process_image(self):
+        file_path = filedialog.askopenfilename(
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp")])
+        
+        if not file_path:
             return
             
         try:
-            if self.current_mode == "point":
-                # Prepare points and labels
-                points = np.array(self.points)
-                labels = np.array([1 if self.point_type_var.get() == "positive" else 0 
-                                 for _ in range(len(self.points))])
-                results = self.model(self.image, points=points, labels=labels)
-            else:  # box mode
-                results = self.model(self.image, bboxes=[self.points])
-                
+            # Load and display original image
+            self.status_label.config(text="Loading image...")
+            self.root.update()
+            
+            original_image = Image.open(file_path)
+            self.update_preview(original_image, 0)
+            
+            # Step 1: Remove background
+            self.status_label.config(text="Removing background...")
+            self.root.update()
+            
+            # Process with background removal
+            self.no_bg_image = self.bg_pipe(file_path)
+            self.update_preview(self.no_bg_image, 1)
+            
+            # Convert PIL image to CV2 format for SAM
+            cv2_image = cv2.cvtColor(np.array(self.no_bg_image), cv2.COLOR_RGB2BGR)
+            
+            # Step 2: SAM Processing
+            self.status_label.config(text="Performing SAM segmentation...")
+            self.root.update()
+            
+            # Process with SAM (automatic mode, no points needed)
+            results = self.sam_model(cv2_image)
+            
             if results[0].masks is None:
                 messagebox.showinfo("Info", "No segments detected")
                 return
                 
-            # Visualize results
-            self.display_image = self.image.copy()
+            # Save original no-background image
+            no_bg_path = os.path.join(self.save_dir, 'no_background.png')
+            self.no_bg_image.save(no_bg_path)
             
+            # Process and save each segment with coordinates
+            result_img = cv2_image.copy()
             for i, mask_tensor in enumerate(results[0].masks.data):
                 mask = mask_tensor.cpu().numpy()
-                if mask.shape != self.image.shape[:2]:
-                    mask = cv2.resize(mask, (self.image.shape[1], self.image.shape[0]))
+                if mask.shape != cv2_image.shape[:2]:
+                    mask = cv2.resize(mask, (cv2_image.shape[1], cv2_image.shape[0]))
+                
+                # Get segment coordinates
+                coords = np.where(mask > 0.5)
+                if len(coords[0]) == 0:
+                    continue
                     
-                # Create colored overlay
+                # Calculate bounding box
+                min_y, max_y = np.min(coords[0]), np.max(coords[0])
+                min_x, max_x = np.min(coords[1]), np.max(coords[1])
+                
+                # Create and save segment
+                segment = np.zeros_like(cv2_image)
+                segment[mask > 0.5] = cv2_image[mask > 0.5]
+                
+                # Save segment image
+                segment_path = os.path.join(self.save_dir, f'segment_{i}.png')
+                cv2.imwrite(segment_path, segment)
+                
+                # Save coordinates
+                coords_path = os.path.join(self.save_dir, f'segment_{i}_coords.txt')
+                with open(coords_path, 'w') as f:
+                    f.write(f"Top-left: ({min_x}, {min_y})\n")
+                    f.write(f"Bottom-right: ({max_x}, {max_y})\n")
+                    f.write(f"Center: ({(min_x + max_x)//2}, {(min_y + max_y)//2})\n")
+                
+                # Color the segment in result image
                 color = np.random.randint(0, 255, 3).tolist()
-                overlay = np.zeros_like(self.image)
-                overlay[mask > 0.5] = color
-                
-                # Blend with image
-                self.display_image = cv2.addWeighted(
-                    self.display_image, 1, overlay, 0.5, 0
-                )
-                
-                # Save segment
-                segment = np.zeros_like(self.image)
-                segment[mask > 0.5] = self.image[mask > 0.5]
-                cv2.imwrite(os.path.join(self.save_dir, f'segment_{i}.png'), segment)
-                
-            self.update_canvas()
+                result_img[mask > 0.5] = color
+            
+            # Update final preview
+            self.update_preview(result_img, 2)
+            
+            self.status_label.config(text=f"Processing complete! Results saved in '{self.save_dir}'")
             messagebox.showinfo("Success", 
-                              f"Processing complete! Segments saved in '{self.save_dir}' directory")
+                              f"Processing complete!\nCheck the '{self.save_dir}' directory for results")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Error processing image: {str(e)}")
-
-def main():
-    root = tk.Tk()
-    app = SAMDetectorGUI(root)
-    root.mainloop()
+            messagebox.showerror("Error", f"Processing failed: {str(e)}")
+            self.status_label.config(text="Processing failed")
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = CombinedSegmentationGUI(root)
+    root.mainloop()
